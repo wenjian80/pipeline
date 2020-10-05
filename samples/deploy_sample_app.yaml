@@ -1,0 +1,7 @@
+appDeployments:
+  Application:
+    'sample-app' :
+      SourcePath: 'wlsdeploy/applications/sample-app.war'
+      Target: '%CLUSTER_NAME%'
+      ModuleType: war
+      StagingMode: nostage

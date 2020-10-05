@@ -1,0 +1,6 @@
+appDeployments:
+  Application:
+    '!sample-app' :
+      Target: '%CLUSTER_NAME%'
+      ModuleType: war
+      StagingMode: nostage

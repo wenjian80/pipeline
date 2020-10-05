@@ -1,0 +1,39 @@
+appDeployments:
+    Application:
+        helloworld:
+            SourcePath: wlsdeploy/applications/helloworld.war
+            Target: 'test-cluster'
+            ModuleType: war
+            StagingMode: nostage
+    Library:
+        'joda-time':
+            SourcePath: 'wlsdeploy/sharedLibraries/mylib.jar'
+            Target: 'test-cluster'
+            ModuleType: jar
+            StagingMode: nostage
+resources:
+    JDBCSystemResource:
+        hellods:
+            Target: 'test-cluster'
+            JdbcResource:
+                DatasourceType: GENERIC
+                JDBCDataSourceParams:
+                    JNDIName: jdbc/hellods
+                JDBCConnectionPoolParams:
+                    ConnectionReserveTimeoutSeconds: 10
+                    InitialCapacity: 0
+                    MaxCapacity: 5
+                    MinCapacity: 0
+                    TestConnectionsOnReserve: True
+                    TestTableName: SQL ISVALID
+                JDBCDriverParams:
+                    DriverName: oracle.jdbc.OracleDriver
+                    PasswordEncrypted: '@@PROP:db.password@@'
+                    URL: 'jdbc:oracle:thin:@//@@PROP:db.url@@'
+                    Properties:
+                        user:
+                            Value: '@@PROP:db.user@@'
+                        oracle.net.CONNECT_TIMEOUT:
+                            Value: 5000
+                        oracle.jdbc.ReadTimeout:
+                          Value: 30000

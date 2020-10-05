@@ -1,0 +1,169 @@
+#!groovy
+/**
+ * Copyright (c) 2020, Oracle Corporation and/or its affiliates.
+ * Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl.
+ */
+/**
+ * This is a common pipeline job meant to be called post domain update.
+ * This job will use the BUILD_TS param to infer the new image tag for the updated domain image.
+ * It will use that image to create a test domain, check if the test domain pods startup fine
+ * then apply the new image to the currently running domain and validate if the pods for the domain startup fine.
+ * In case of any error in apply the updated domain image to the domain, it will rollback the domain to the
+ * previously working domain image.
+ */
+def ARGS=""
+pipeline {
+    agent {
+        node {
+            // Restrict build to run on slave pods.
+            label 'agent-label-slave'
+        }
+    }
+    options {
+        skipStagesAfterUnstable()
+        // Do not allow concurrent builds
+        disableConcurrentBuilds()
+        timestamps()
+        warnError('Pipeline error caught')
+    }
+    parameters {
+        string defaultValue:'', description:'Arguments for the job', name:'ARGS'
+        string defaultValue: '', description:'Build timestamp', name:'BUILD_TS'
+        password(defaultValue: '', description: 'Encryption passphrase used to encrypt model or variables properties file with WebLogic Deploy Tool encryptModel command', name: 'Encryption_Passphrase')
+    }
+    stages {
+        /* Test domain stage:
+            Creates a test domain with <domainUID>-test as domain name in the <domainNamespace>-test namespace.
+            Note: the <domainNamespace>-test namespace is pre-created during provisioning and is not created in pipeline
+            job run.
+            Test domain is created with replica count 1 so 1 admin server pod and 1 managed server pod will be started.
+        */
+        stage("TEST_DOMAIN") {
+            steps {
+                echo "Creating Test Domain image... "
+
+                echo "BUILD_TS: ${params.BUILD_TS}"
+                script {
+                    ARGS = params.ARGS + " -b " + params.BUILD_TS
+                }
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/common/test_domain_common.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in test domain"
+                }
+                unstable {
+                    echo "Unstable in test domain"
+                }
+            }
+        }
+        /*
+         Test domain validation:
+            Test domain created in the previous stage is validated by checking if the server pods start in ready/running
+            state.
+         */
+        stage("TEST_DOMAIN_VALIDATION") {
+            steps {
+                echo "Validating Test Domain image... "
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/common/validate_test_domain_common.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in validate test domain"
+                }
+                unstable {
+                    echo "Unstable in validate test domain"
+                }
+            }
+        }
+        /* Deploy domain stage:
+            Deploy the new image to the running domain.
+            In case of failure to apply the new image to the domain, the domain is rolled back to the previous working
+            domain image.
+            Upon rollback, new domain image will be deleted from OCIR.
+        */
+        stage("DEPLOY_DOMAIN") {
+            steps {
+                echo "Deploying Domain image... "
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/common/deploy_domain_common.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in deploy domain"
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                        sh "/u01/shared/scripts/pipeline/common/rollback_domain_common.sh ${ARGS}"
+                    }
+                }
+                unstable {
+                    echo "Unstable in deploy domain"
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                        sh "/u01/shared/scripts/pipeline/common/rollback_domain_common.sh ${ARGS}"
+                    }
+                }
+            }
+        }
+        /* Domain validation stage:
+            The domain is validated by checking for all its server pods are in running/ready state.
+            If the validation fails, the domain is rolled back to the previous working image.
+        */
+        stage("DOMAIN_VALIDATION") {
+            steps {
+                echo "Validating Domain ... "
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/common/validate_domain_common.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in validate test domain"
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                        sh "/u01/shared/scripts/pipeline/common/rollback_domain_common.sh ${ARGS}"
+                    }
+                }
+                unstable {
+                    echo "Unstable in validate test domain"
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                        sh "/u01/shared/scripts/pipeline/common/rollback_domain_common.sh ${ARGS}"
+                    }
+                }
+            }
+        }
+    }
+    /*
+        Post stage for pipeline job:
+            Perform cleanup of any temporary resources created during the pipeline job execution.
+     */
+    post {
+        unstable {
+            echo "Pipeline build unstable"
+            wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                sh "/u01/shared/scripts/pipeline/common/cleanup_common.sh ${ARGS}"
+            }
+        }
+        success {
+            echo "Pipeline build successful"
+            wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                sh "/u01/shared/scripts/pipeline/common/cleanup_common.sh ${ARGS}"
+            }
+        }
+        failure {
+            echo "Pipeline build failed"
+            wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                sh "/u01/shared/scripts/pipeline/common/cleanup_common.sh ${ARGS}"
+            }
+            // mail to:"me@example.com", subject:"FAILURE: ${currentBuild.fullDisplayName}", body: "Pipeline build failed."
+        }
+        aborted {
+            echo "Pipeline build aborted"
+            wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                sh "/u01/shared/scripts/pipeline/common/cleanup_common.sh ${ARGS}"
+            }
+        }
+    }
+}

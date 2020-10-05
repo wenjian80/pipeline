@@ -1,0 +1,181 @@
+/**
+ * Copyright (c) 2020, Oracle Corporation and/or its affiliates.
+ * Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl.
+ */
+
+/* Jenkinsfile for applying JDK patch */
+
+properties([
+    parameters([
+        choice(choices: ['Object Storage', 'Shared File System'], description: 'JDK installer can be provided via either the pre-authenticated URL for the file in Object Storage (https://<pre-authenticated URL>/jdk*tar.gz) or at a path on the shared file system (under /u01/shared location).', name: 'JDK_Installer'),
+        [$class: 'DynamicReferenceParameter', choiceType: 'ET_FORMATTED_HTML', description: '', name: 'JDK_Location', omitValueField: true, randomName: 'choice-parameter-18678596810203237', referencedParameters: 'JDK_Installer', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: 'if (JDK_Installer.equals("Object Storage")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'object_storage\'> <br> <label for=\'object_storage\' class=\'setting-description\'>Pre-authenticated URL to download JDK installer (https://pre-authenticated-URL/jdk*tar.gz) in tar.gz format.</label>" } else if (JDK_Installer.equals("Shared File System")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'shared_file\'><br><label for=\'shared_file\' class=\'setting-description\'>Full path to the location of JDK installer (/u01/shared/path/to/jdk*tar.gz) in tar.gz format.</label>" }']]],
+        booleanParam(defaultValue: true, description: 'Rollback to previous state if Apply Domain fails.', name: 'Rollback_On_Failure'),
+//         booleanParam(defaultValue: false, description: 'Scan domain image for security vulnerabilities.', name: 'Scan_Image_Enabled')
+    ])
+])
+
+def ARGS = ""
+pipeline {
+    agent {
+        node {
+            label 'agent-label-slave'
+        }
+    }
+    options {
+        skipStagesAfterUnstable()
+        disableConcurrentBuilds()
+        timestamps()
+        warnError('Pipeline error caught')
+    }
+    environment {
+        BUILD_TS = get_build_timestamp()
+    }
+    stages {
+        stage("PRE-CHECK") {
+            steps {
+                echo "Validating Domain is running... "
+                echo "JDK_Installer: ${params.JDK_Installer}"
+                echo "JDK_Location: ${params.JDK_Location}"
+                echo "Rollback_On_Failure: ${params.Rollback_On_Failure}"
+//                 echo "Scan_Image: ${params.Scan_Image_Enabled}"
+                script {
+                    if (params.Rollback_On_Failure) {
+                        ARGS += "-r "
+                    }
+//                     if (params.Scan_Image_Enabled) {
+//                         ARGS += "-s "
+//                     }
+
+                    // Get JDK .tar.gz bundle
+                    switch (params.JDK_Installer) {
+                        case 'Object Storage':
+                           if (isURLValid(params.JDK_Location)) {
+                              sh "wget -O $WORKSPACE/jdk.tar.gz ${JDK_Location}"
+                              ARGS += "-j " + env.WORKSPACE + "/jdk.tar.gz "
+                           } else {
+                                println "URL is invalid: [" + params.JDK_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Shared File System Location':
+                            if (checkFileExists(params.JDK_Location)) {
+                               sh "cp ${JDK_Location} $WORKSPACE/jdk.tar.gz"
+                               ARGS += "-j " + env.WORKSPACE + "/jdk.tar.gz "
+                            } else {
+                                println "File does not exist: [" + params.JDK_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                    }
+
+                        println "ARGS: " + ARGS
+                        sh "/u01/shared/scripts/pipeline/common/precheck_common.sh ${ARGS}"
+                }
+
+            }
+            post {
+                failure {
+                    echo "Failed in pre-check"
+                }
+                unstable {
+                    echo "Unstable in pre-check"
+                }
+            }
+        }
+        stage('APPLY_JDK') {
+            steps {
+                echo "Apply JDK Patch... "
+                sh "/u01/shared/scripts/pipeline/jdk-patch/apply_jdk_patch.sh ${ARGS}"
+            }
+            post {
+                failure {
+                    echo "Failed in apply jdk"
+                }
+                unstable {
+                    echo "Unstable in apply jdk"
+                }
+            }
+        }
+
+        /* Scan Image stage:
+            Scan the new image for vulnerabilities.
+         */
+//         stage("SCAN_IMAGE") {
+//             steps {
+//                 echo "Scanning image for vulnerabilities..."
+//                 sh "/u01/shared/scripts/pipeline/common/scan_domain_img_common.sh ${ARGS}"
+//             }
+//             post {
+//                 failure {
+//                     echo "Failed in scanning image"
+//                 }
+//                 unstable {
+//                     echo "Unstable in scanning image"
+//                 }
+//             }
+//         }
+        stage("OCIR_UPLOAD") {
+            steps {
+                echo "Pushing Domain image to OCIR... "
+                sh "/u01/shared/scripts/pipeline/common/ocir_push_domain_img_common.sh ${ARGS}"
+            }
+            post {
+                failure {
+                    echo "Failed in pushing domain to OCIR"
+                }
+                unstable {
+                    echo "Unstable in pushing domain to OCIR"
+                }
+            }
+        }
+        stage("TEST_AND_DEPLOY_DOMAIN") {
+            steps {
+                build job: 'test-and-deploy-domain-job',
+                        parameters: [
+                                string(name: 'ARGS', value: "${ARGS}"),
+                                string(name:'BUILD_TS', value:"${BUILD_TS}"),
+                        ]
+            }
+        }
+    }
+}
+
+/**
+ * Generating build timestamp.
+ * This will be used to tag the updated domain docker image.
+ */
+def get_build_timestamp() {
+    Date date = new Date()
+    buildTimestamp = date.format('yy-MM-dd_HH-mm-ss')
+    println("Generated Build Timestamp: " + buildTimestamp)
+    return buildTimestamp
+}
+/**
+ * Check if valid URL.
+ * @param str   URL string
+ * @return  true if valid, false otherwise.
+ */
+def Boolean isURLValid(String str)
+{
+    try {
+        new URL(str)
+        return true
+    } catch (MalformedURLException e) {
+        return false
+    }
+}
+/**
+ * Check if file exists.
+ *
+ * @param fileName  Absolute path of file.
+ * @return  true if file exists, false otherwise.
+ */
+def Boolean checkFileExists(String fileName) {
+    try {
+        File file = new File(fileName)
+        return file.exists()
+    } catch (Exception e) {
+        return false
+    }
+}
+

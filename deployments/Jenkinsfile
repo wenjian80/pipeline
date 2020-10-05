@@ -1,0 +1,383 @@
+#!groovy
+/**
+ * Copyright (c) 2020, Oracle Corporation and/or its affiliates.
+ * Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl.
+ */
+
+/* Jenkinsfile for Deploy Applications, Libraries and Resources to running WebLogic Domain. */
+import hudson.FilePath
+import hudson.model.ParametersAction
+import hudson.model.FileParameterValue
+import java.io.File
+
+/* Using ActiveChoice Plugin version 2.2.2 */
+properties([
+        parameters([
+                choice(choices: ['None', 'File Upload', 'Object Storage', 'Shared File System'], description: 'WebLogic Deploy Tool archive zip file can be provided via the uploading the zip file from local system, the pre-authenticated URL for the file in Object Storage, or at a path on the shared file system (under /u01/shared location).', name: 'Archive_Source'),
+                [$class: 'DynamicReferenceParameter', choiceType: 'ET_FORMATTED_HTML', description: '', name: 'Archive_File_Location', omitValueField: true, randomName: 'choice-parameter-210334685165215', referencedParameters: 'Archive_Source', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: 'if (Archive_Source.equals("None")) { return "<label id=\'none\'>N/A</label><br><label for=\'none\' class=\'setting-description\'>Select Archive_Source type</label>" } else if (Archive_Source.equals("Object Storage")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'object_storage\'><br><label for=\'object_storage\' class=\'setting-description\'>Pre-authenticated URL to download the WebLogic Deploy Tool Archive zip file.</label>" } else if (Archive_Source.equals("Shared File System")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'shared_file\'><br><label for=\'shared_file\' class=\'setting-description\'>Full path to the location of WebLogic Deploy Tool Archive zip file (/u01/shared/path/to/archive.zip).</label>" } else if (Archive_Source.equals("File Upload")) { return "<input name=\'file\' type=\'file\' jsonaware=\'true\' id=\'file_upload\'><br><label for=\'file_upload\' class=\'setting-description\'>Upload local WebLogic Deploy Tool Archive zip file.</label>" }']]],
+                choice(choices: ['None', 'File Upload', 'Object Storage', 'Shared File System'], description: 'WebLogic Deploy Tool domain model YAML file can be provided via uploading the zip file from local system, putting the pre-authenticated URL for the file in Object Storage, or at a path on the shared file system (under /u01/shared location).', name: 'Domain_Model_Source'),
+                [$class: 'DynamicReferenceParameter', choiceType: 'ET_FORMATTED_HTML', description: '', name: 'Model_File_Location', omitValueField: true, randomName: 'choice-parameter-210334690910316', referencedParameters: 'Domain_Model_Source', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: 'if (Domain_Model_Source.equals("None")) { return "<label id=\'none\'>N/A</label><br><label for=\'none\' class=\'setting-description\'>Select Domain_Model_Source type</label>" } else if (Domain_Model_Source.equals("Object Storage")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'object_storage\'><br><label for=\'object_storage\' class=\'setting-description\'>Pre-authenticated URL to download the WebLogic Deploy Tool Domain Model YAML file.</label>" } else if (Domain_Model_Source.equals("Shared File System")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'shared_file\'><br><label for=\'shared_file\' class=\'setting-description\'>Full path to the location of WebLogic Deploy Tool Domain Model YAML file (/u01/shared/path/to/model.yaml).</label>" } else if (Domain_Model_Source.equals("File Upload")) { return "<input name=\'file\' type=\'file\' jsonaware=\'true\' id=\'file_upload\'><br><label for=\'file_upload\' class=\'setting-description\'>Upload local WebLogic Deploy Tool Domain Model YAML file.</label>" }']]],
+                choice(choices: ['None', 'File Upload', 'Object Storage', 'Shared File System'], description: 'WebLogic Deploy Tool variables properties file can be provided via either uploading the zip file from local system or putting the pre-authenticated URL for the file in Object Storage or at a path on the shared file system (under /u01/shared location).', name: 'Variable_Source'),
+                [$class: 'DynamicReferenceParameter', choiceType: 'ET_FORMATTED_HTML', description: '', name: 'Variable_File_Location', omitValueField: true, randomName: 'choice-parameter-210334695628227', referencedParameters: 'Variable_Source', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: ''], script: [classpath: [], sandbox: false, script: 'if (Variable_Source.equals("None")) { return "<label id=\'none\'>N/A</label><br><label for=\'none\' class=\'setting-description\'>Select Variable_Source type</label>" } else if (Variable_Source.equals("Object Storage")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'object_storage\'><br><label for=\'object_storage\' class=\'setting-description\'>Pre-authenticated URL to download the WebLogic Deploy Tool variables properties file.</label>" } else if (Variable_Source.equals("Shared File System")) { return "<input name=\'value\' class=\'setting-input\' type=\'text\' id=\'shared_file\'><br><label for=\'shared_file\' class=\'setting-description\'>Full path to the location of WebLogic Deploy Tool variables properties file (/u01/shared/path/to/variables.properties).</label>" } else if (Variable_Source.equals("File Upload")) { return "<input name=\'file\' type=\'file\' jsonaware=\'true\' id=\'file_upload\'><br><label for=\'file_upload\' class=\'setting-description\'>Upload local WebLogic Deploy Tool variables properties file.</label>" }']]],
+                [$class: 'com.michelin.cio.hudson.plugins.passwordparam.PasswordParameterDefinition', description: 'Enter the encryption passphrase used to encrypt model or variables properties file with WebLogic Deploy Tool encryptModel command.', name: 'Encryption_Passphrase'],
+                booleanParam(defaultValue: true, description: 'Rollback to previous state if Apply Domain fails.', name: 'Rollback_On_Failure'),
+//                booleanParam(defaultValue: false, description: 'Scan domain image for security vulnerabilities.', name: 'Scan_Image_Enabled')
+        ])
+])
+
+def ARGS = ""
+pipeline {
+    agent {
+        node {
+            // Restrict build to run on slave pods.
+            label 'agent-label-slave'
+        }
+    }
+    options {
+        skipStagesAfterUnstable()
+        // Do not allow concurrent builds
+        disableConcurrentBuilds()
+        timestamps()
+        warnError('Pipeline error caught')
+    }
+    environment {
+        BUILD_TS = getBuildTimestamp()
+    }
+    stages {
+        /* Pre-check stage:
+            Validate the params passed to the job.
+            Validate the running domain if all server pods are in ready/running state.
+         */
+        stage("PRE-CHECK") {
+            steps {
+                echo "Validating Domain is running... "
+                echo "Archive_Source: ${params.Archive_Source}"
+                echo "Archive_File_Location: ${params.Archive_File_Location}"
+                echo "Domain_Model_Source: ${params.Domain_Model_Source}"
+                echo "Model_File_Location: ${params.Model_File_Location}"
+                echo "Variable_Source: ${params.Variable_Source}"
+                echo "Variable_File_Location: ${params.Variable_File_Location}"
+                echo "Rollback_On_Failure: ${params.Rollback_On_Failure}"
+//                echo "Scan_Image: ${params.Scan_Image_Enabled}"
+
+                script {
+                    if (params.Rollback_On_Failure) {
+                        ARGS += "-r "
+                    }
+
+//                    if (params.Scan_Image_Enabled) {
+//                        ARGS += "-s "
+//                    }
+
+                    if (params.Encryption_Passphrase != null && !params.Encryption_Passphrase.toString().equals("")) {
+                        ARGS += "-e '" + params.Encryption_Passphrase + "' "
+                    }
+
+                    // Get WDT archive zip
+                    switch (params.Archive_Source) {
+                        case 'File Upload':
+                            def archive_file_in_workspace = unstashParam("Archive_File_Location")
+                            echo "Archive file: [" + archive_file_in_workspace + "]"
+                            if (archive_file_in_workspace != null && archive_file_in_workspace != "") {
+                                ARGS += "-a " + archive_file_in_workspace + " "
+                            } else {
+                                println "Archive File not provided: [" + archive_file_in_workspace + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Object Storage':
+                            if (isURLValid(params.Archive_File_Location)) {
+                                sh "wget -O $WORKSPACE/archive.zip ${Archive_File_Location}"
+                                ARGS += "-a " + env.WORKSPACE + "/archive.zip "
+                            } else {
+                                println "URL is invalid: [" + params.Archive_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Shared File System':
+                            if (checkFileExists(params.Archive_File_Location)) {
+                                ARGS += "-a " + params.Archive_File_Location + " "
+                            } else {
+                                println "File does not exist: [" + params.Archive_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'None':
+                            println "Archive file not specified."
+                            break
+                    }
+
+                    // Get WDT model yaml
+                    switch (params.Domain_Model_Source) {
+                        case 'File Upload':
+                            def model_file_in_workspace = unstashParam("Model_File_Location")
+                            echo "Model file: [" + model_file_in_workspace + "]"
+                            if (model_file_in_workspace != null && model_file_in_workspace != "") {
+                                ARGS += "-m " + model_file_in_workspace + " "
+                            } else {
+                                println "Model File not provided: [" + model_file_in_workspace + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Object Storage':
+                            if (isURLValid(params.Model_File_Location)) {
+                                sh "wget -O $WORKSPACE/model.yaml ${Model_File_Location}"
+                                ARGS += "-m " + env.WORKSPACE + "/model.yaml "
+                            } else {
+                                println "URL is invalid: [" + params.Model_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Shared File System':
+                            if (checkFileExists(params.Model_File_Location)) {
+                                ARGS += "-m " + params.Model_File_Location + " "
+                            } else {
+                                println "File does not exist: [" + params.Model_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'None':
+                            println "Model file not specified."
+                            break
+                    }
+
+                    switch (params.Variable_Source) {
+                        case 'File Upload':
+                            def variable_file_in_workspace = unstashParam("Variable_File_Location")
+                            echo "Variable file: [" + variable_file_in_workspace + "]"
+                            if (variable_file_in_workspace != null && variable_file_in_workspace != "") {
+                                ARGS += "-p " + variable_file_in_workspace + " "
+                            } else {
+                                println "Variable File not provided: [" + variable_file_in_workspace + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Object Storage':
+                            if (isURLValid(params.Variable_File_Location)) {
+                                sh "wget -O $WORKSPACE/variables.properties ${Variable_File_Location}"
+                                ARGS += "-p " + env.WORKSPACE + "/variables.properties "
+                            } else {
+                                println "URL is invalid: [" + params.Variable_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'Shared File System':
+                            if (checkFileExists(params.Variable_File_Location)) {
+                                ARGS += "-p " + params.Variable_File_Location + " "
+                            } else {
+                                println "File does not exist: [" + params.Variable_File_Location + "]"
+                                error("Build failed")
+                            }
+                            break
+                        case 'None':
+                            println "Variable file not specified."
+                            break
+                    }
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                        sh "/u01/shared/scripts/pipeline/common/precheck_common.sh ${ARGS}"
+                    }
+                }
+
+            }
+            post {
+                failure {
+                    echo "Failed in pre-check"
+                }
+                unstable {
+                    echo "Unstable in pre-check"
+                }
+            }
+        }
+        /* Build domain stage:
+            Using WebLogic deploy tool deployApps.sh command deploy the applications, libraries or resources provided
+            by user and build a new docker image from it.
+         */
+        stage('BUILD_DOMAIN') {
+            steps {
+                echo "Building Domain... "
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/deployments/deploy_apps_build_domain.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in build domain"
+                }
+                unstable {
+                    echo "Unstable in build domain"
+                }
+            }
+        }
+        /* Rebase stage:
+            Rebase the new docker image created in the previous stage to create an image with minimal possible image size.
+         */
+        stage("REBASE") {
+            steps {
+                echo "Rebasing Domain image... "
+
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/deployments/deploy_apps_rebase_domain.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in rebase domain"
+                }
+                unstable {
+                    echo "Unstable in rebase domain"
+                }
+            }
+        }
+        /* Scan Image stage:
+            Scan the new image for vulnerabilities.
+         */
+//        stage("SCAN_IMAGE") {
+//            steps {
+//                echo "Scanning image for vulnerabilities..."
+//
+//                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+//                    sh "/u01/shared/scripts/pipeline/common/scan_domain_img_common.sh ${ARGS}"
+//                }
+//            }
+//            post {
+//                failure {
+//                    echo "Failed in scanning image"
+//                }
+//                unstable {
+//                    echo "Unstable in scanning image"
+//                }
+//            }
+//        }
+        /* OCIR upload stage:
+            Push the new image to OCIR.
+         */
+        stage("OCIR_UPLOAD") {
+            steps {
+                echo "Pushing Domain image to OCIR... "
+
+                wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[password: '${ARGS}', var: 'SECRET']]]) {
+                    sh "/u01/shared/scripts/pipeline/common/ocir_push_domain_img_common.sh ${ARGS}"
+                }
+            }
+            post {
+                failure {
+                    echo "Failed in pushing domain to OCIR"
+                }
+                unstable {
+                    echo "Unstable in pushing domain to OCIR"
+                }
+            }
+        }
+        /* Test and deploy domain stage:
+            Call the test and deploy domain job to test the new domain image and apply it to the running domain.
+         */
+        stage("TEST_AND_DEPLOY_DOMAIN") {
+            steps {
+                build job: 'test-and-deploy-domain-job',
+                        parameters: [
+                                string(name: 'ARGS', value: "${ARGS}"),
+                                string(name:'BUILD_TS', value:"${BUILD_TS}"),
+                                password(name:'Encryption_Passphrase', value: "${params.Encryption_Passphrase}")
+                        ]
+            }
+        }
+
+    }
+}
+/**
+ * Generating build timestamp.
+ * This will be used to tag the updated domain docker image.
+ */
+def getBuildTimestamp() {
+    Date date = new Date()
+    buildTimestamp = date.format('yy-MM-dd_HH-mm-ss')
+    println("Generated Build Timestamp: " + buildTimestamp)
+    return buildTimestamp
+}
+/**
+ * Check if valid URL.
+ * @param str   URL string
+ * @return  true if valid, false otherwise.
+ */
+def Boolean isURLValid(String str)
+{
+    try {
+        new URL(str)
+        return true
+    } catch (MalformedURLException e) {
+        return false
+    }
+}
+/**
+ * Check if file exists.
+ *
+ * @param fileName  Absolute path of file.
+ * @return  true if file exists, false otherwise.
+ */
+def Boolean checkFileExists(String fileName) {
+    try {
+        File file = new File(fileName)
+        return file.exists()
+    } catch (Exception e) {
+        return false
+    }
+}
+/**
+* Copyright (c) 2017 Palantir Solutions
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+  @see https://github.com/janvrany/jenkinsci-unstashParam-library
+
+  The function below has been modified to return absolute path of the file.
+*/
+def unstashParam(String name) {
+    println "unstashParam called for file param: " + name
+
+    def paramsAction = currentBuild.rawBuild.getAction(ParametersAction.class);
+    if (paramsAction != null) {
+        for (param in paramsAction.getParameters()) {
+            if (param.getName().equals(name)) {
+                if (!(param instanceof FileParameterValue)) {
+                    error "unstashParam: not a file parameter: ${name}"
+                }
+                if (env.NODE_NAME == null) {
+                    error "unstashParam: no node in current context"
+                }
+                if (env.WORKSPACE == null) {
+                    error "unstashParam: no workspace in current context"
+                }
+                if (env.NODE_NAME.equals("master")) {
+                    workspace = new FilePath(null, env.WORKSPACE)
+                } else {
+                    workspace = new FilePath(Jenkins.getInstance().getComputer(env.NODE_NAME).getChannel(), env.WORKSPACE)
+                }
+
+                filename = param.getOriginalFileName()
+                println 'Putting file [' + filename + '] in workspace [' + workspace + ']'
+                file = workspace.child(filename)
+                destFolder = file.getParent()
+                destFolder.mkdirs()
+                file.copyFrom(param.getFile())
+                File f = new File(file.toURI())
+                return f.getAbsolutePath()
+            }
+        }
+    }
+}
